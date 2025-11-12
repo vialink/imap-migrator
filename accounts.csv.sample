@@ -1,0 +1,3 @@
+email_origem,conta_origem,senha_origem,servidor_origem,email_destino,conta_destino,senha_destino,servidor_destino
+user1@origem.com,user1,senha123,imap.origem.com,user1@destino.com,user1,senha456,imap.destino.com
+user2@origem.com,user2,senha789,imap.origem.com,user2@destino.com,user2,senha012,imap.destino.com

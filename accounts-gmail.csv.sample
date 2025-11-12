@@ -1,0 +1,4 @@
+email_origem,conta_origem,senha_origem,servidor_origem,email_destino,conta_destino,senha_destino,servidor_destino
+user1@gmail.com,user1@gmail.com,abcdefghijklmnop,imap.gmail.com,user1@destino.com,user1,senha123,imap.destino.com
+user2@origem.com,user2,senha456,imap.origem.com,user2@gmail.com,user2@gmail.com,qrstuvwxyzabcdef,imap.gmail.com
+user3@gmail.com,user3@gmail.com,aaabbbcccdddeeef,imap.gmail.com,user4@gmail.com,user4@gmail.com,fffggghhhiiijjjk,imap.gmail.com
