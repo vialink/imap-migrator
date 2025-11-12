@@ -127,4 +127,4 @@ This tool is provided as-is for email migration purposes.
 
 ---
 
-**Version 11** - Full-featured IMAP migration tool with advanced filtering and reporting.
+**Version 1.0** - Full-featured IMAP migration tool with advanced filtering and reporting.
