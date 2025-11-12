@@ -117,8 +117,9 @@ After migration, detailed reports are generated in the `reports/` directory with
 
 ## 🆘 Support
 
-For issues, questions, or feature requests, please visit:
-https://help.manus.im
+For issues, questions, or feature requests, send email to:
+
+cabreu@vialink.com.br
 
 ## 📄 License
 
