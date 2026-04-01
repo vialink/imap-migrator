@@ -34,37 +34,27 @@ func (dt *DuplicateTracker) BuildExistingMessagesIndex(client *imapclient.Client
 		return nil // Pasta vazia, nada a indexar
 	}
 
+	// Buscar Message-IDs de todas as mensagens
+	uidSet := imap.UIDSet{}
+	uidSet.AddRange(1, selectData.UIDNext-1)
+
 	fetchOptions := &imap.FetchOptions{
 		Envelope: true,
 	}
 
-	// Tamanho do lote de mensagens processadas por vez.
-	// Você pode ajustar esta variável (ex: 1000, 2000) conforme o limite do seu provedor.
-	batchSize := imap.UID(2000)
+	messages, err := client.Fetch(uidSet, fetchOptions).Collect()
+	if err != nil {
+		return fmt.Errorf("erro ao buscar mensagens para indexação: %w", err)
+	}
 
-	for start := imap.UID(1); start < selectData.UIDNext; start += batchSize {
-		end := start + batchSize - 1
-		if end >= selectData.UIDNext {
-			end = selectData.UIDNext - 1
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+
+	for _, msg := range messages {
+		if msg.Envelope != nil && msg.Envelope.MessageID != "" {
+			// Usar Message-ID como identificador único
+			dt.hashes[msg.Envelope.MessageID] = true
 		}
-
-		uidSet := imap.UIDSet{}
-		uidSet.AddRange(start, end)
-
-		messages, err := client.Fetch(uidSet, fetchOptions).Collect()
-		if err != nil {
-			return fmt.Errorf("erro ao buscar mensagens para indexação (lote %d-%d): %w", start, end, err)
-		}
-
-		// Inserir os hashes coletados no Tracker protegidos pelo mutex
-		dt.mu.Lock()
-		for _, msg := range messages {
-			if msg.Envelope != nil && msg.Envelope.MessageID != "" {
-				// Usar Message-ID como identificador único
-				dt.hashes[msg.Envelope.MessageID] = true
-			}
-		}
-		dt.mu.Unlock()
 	}
 
 	return nil
