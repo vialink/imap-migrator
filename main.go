@@ -418,6 +418,12 @@ func migrateAccount(acc MigrationAccount, config MigrationConfig) error {
 				for attempt := 0; attempt <= config.MaxRetries; attempt++ {
 					if attempt > 0 {
 						log.Printf("[%s] Tentativa %d/%d para a mensagem %d/%d", acc.SourceEmail, attempt, config.MaxRetries, processedCount, totalExpected)
+
+						// Se houve erro na tentativa anterior indicando conexão fechada, reconectar
+						if copyErr != nil && isConnectionClosed(copyErr) {
+							log.Printf("[%s] Conexão com destino parece fechada na cópia. Reconectando...", acc.DestinationEmail)
+							reconnectIfNeeded(&destClient, acc.DestinationHost, acc.DestinationUser, acc.DestinationPass, copyErr)
+						}
 					}
 
 					appendCmd := destClient.Append(destFolderName, int64(len(bodyBytes)), &imap.AppendOptions{
