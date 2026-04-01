@@ -83,6 +83,7 @@ All options are configured in `config.json`:
 - **date_to**: Migrate only messages <= this date (YYYY-MM-DD)
 - **folder_mapping**: Rename folders during migration
 - **system_folders**: Alternative names for system folders
+- **fetch_batch_size**: Number of messages to fetch per request. Lower values (e.g. 500 or 1000) help prevent connection timeouts on very large folders.
 
 ## 📚 Documentation
 

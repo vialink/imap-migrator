@@ -17,22 +17,23 @@ type MigrationConfig struct {
 	MaxRetries              int    `json:"max_retries"`
 	MaxMessageSizeMB        int    `json:"max_message_size_mb"`
 	FlattenFolders          bool   `json:"flatten_folders"`
-	
+	FetchBatchSize          int    `json:"fetch_batch_size"`
+
 	// Filtros de pastas
-	ExcludeFolders     []string          `json:"exclude_folders"`
-	IncludeFolders     []string          `json:"include_folders"`
-	
+	ExcludeFolders []string `json:"exclude_folders"`
+	IncludeFolders []string `json:"include_folders"`
+
 	// Filtros de data
-	DateFrom           string            `json:"date_from"` // Formato: 2006-01-02
-	DateTo             string            `json:"date_to"`   // Formato: 2006-01-02
-	
+	DateFrom string `json:"date_from"` // Formato: 2006-01-02
+	DateTo   string `json:"date_to"`   // Formato: 2006-01-02
+
 	// Mapeamento de pastas
-	FolderMapping      map[string]string `json:"folder_mapping"`
-	SystemFolders      SystemFolders     `json:"system_folders"`
-	
+	FolderMapping map[string]string `json:"folder_mapping"`
+	SystemFolders SystemFolders     `json:"system_folders"`
+
 	// Campos internos (parseados)
-	dateFromParsed     *time.Time
-	dateToParsed       *time.Time
+	dateFromParsed *time.Time
+	dateToParsed   *time.Time
 }
 
 // SystemFolders define nomes alternativos para pastas de sistema.
@@ -54,11 +55,12 @@ func DefaultConfig() MigrationConfig {
 		MaxRetries:              3,
 		MaxMessageSizeMB:        0, // 0 = sem limite
 		FlattenFolders:          false,
-		ExcludeFolders:   []string{},
-		IncludeFolders:   []string{},
-		DateFrom:         "",
-		DateTo:           "",
-		FolderMapping:    make(map[string]string),
+		FetchBatchSize:          1000,
+		ExcludeFolders:          []string{},
+		IncludeFolders:          []string{},
+		DateFrom:                "",
+		DateTo:                  "",
+		FolderMapping:           make(map[string]string),
 		SystemFolders: SystemFolders{
 			Drafts:  []string{"Drafts", "INBOX.Drafts", "[Gmail]/Drafts"},
 			Sent:    []string{"Sent", "Sent Messages", "INBOX.Sent", "[Gmail]/Sent Mail"},
@@ -75,19 +77,19 @@ func LoadConfig(filePath string) (MigrationConfig, error) {
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return DefaultConfig(), nil
 	}
-	
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return MigrationConfig{}, fmt.Errorf("erro ao abrir ficheiro de configuração: %w", err)
 	}
 	defer file.Close()
-	
+
 	var config MigrationConfig
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&config); err != nil {
 		return MigrationConfig{}, fmt.Errorf("erro ao parsear configuração JSON: %w", err)
 	}
-	
+
 	// Parsear datas
 	if config.DateFrom != "" {
 		t, err := time.Parse("2006-01-02", config.DateFrom)
@@ -96,7 +98,7 @@ func LoadConfig(filePath string) (MigrationConfig, error) {
 		}
 		config.dateFromParsed = &t
 	}
-	
+
 	if config.DateTo != "" {
 		t, err := time.Parse("2006-01-02", config.DateTo)
 		if err != nil {
@@ -106,17 +108,22 @@ func LoadConfig(filePath string) (MigrationConfig, error) {
 		endOfDay := t.Add(24*time.Hour - time.Second)
 		config.dateToParsed = &endOfDay
 	}
-	
+
+	// Se FetchBatchSize não foi especificado ou é inválido, usar padrão
+	if config.FetchBatchSize <= 0 {
+		config.FetchBatchSize = 1000
+	}
+
 	// Se AccountsFile não foi especificado, usar padrão
 	if config.AccountsFile == "" {
 		config.AccountsFile = "accounts.csv"
 	}
-	
+
 	// Se MaxConcurrentMigrations não foi especificado ou é inválido, usar padrão
 	if config.MaxConcurrentMigrations <= 0 {
 		config.MaxConcurrentMigrations = 5
 	}
-	
+
 	return config, nil
 }
 
@@ -135,14 +142,14 @@ func (c *MigrationConfig) ShouldIncludeFolder(folderName string) bool {
 			return false
 		}
 	}
-	
+
 	// Verificar blacklist
 	for _, f := range c.ExcludeFolders {
 		if f == folderName {
 			return false
 		}
 	}
-	
+
 	return true
 }
 
@@ -152,12 +159,12 @@ func (c *MigrationConfig) ShouldIncludeMessage(messageDate time.Time, messageSiz
 	if c.dateFromParsed != nil && messageDate.Before(*c.dateFromParsed) {
 		return false, fmt.Sprintf("data anterior a %s", c.DateFrom)
 	}
-	
+
 	// Verificar data máxima
 	if c.dateToParsed != nil && messageDate.After(*c.dateToParsed) {
 		return false, fmt.Sprintf("data posterior a %s", c.DateTo)
 	}
-	
+
 	// Verificar tamanho máximo
 	if c.MaxMessageSizeMB > 0 {
 		maxBytes := c.MaxMessageSizeMB * 1024 * 1024
@@ -165,7 +172,7 @@ func (c *MigrationConfig) ShouldIncludeMessage(messageDate time.Time, messageSiz
 			return false, fmt.Sprintf("tamanho %d bytes excede limite de %d MB", messageSize, c.MaxMessageSizeMB)
 		}
 	}
-	
+
 	return true, ""
 }
 

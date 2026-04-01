@@ -328,7 +328,7 @@ func migrateAccount(acc MigrationAccount, config MigrationConfig) error {
 		}
 
 		// Tamanho do lote ajustável para evitar timeout e liberar memória
-		batchSize := imap.UID(1000)
+		batchSize := imap.UID(config.FetchBatchSize)
 		copiedCount := 0
 		processedCount := 0
 		totalExpected := sourceData.NumMessages
