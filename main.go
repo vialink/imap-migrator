@@ -304,39 +304,7 @@ func migrateAccount(acc MigrationAccount, config MigrationConfig) error {
 			continue
 		}
 
-		// Buscar mensagens
-		uidSet := imap.UIDSet{}
-		uidSet.AddRange(1, sourceData.UIDNext-1)
-		fetchOptions := &imap.FetchOptions{
-			BodySection: []*imap.FetchItemBodySection{{}},
-			Flags:       true,
-			Envelope:    true,
-		}
-
-		log.Printf("[%s] Fazendo fetch de mensagens da pasta '%s' usando UIDs...", acc.SourceEmail, folderName)
-
-		messages, err := sourceClient.Fetch(uidSet, fetchOptions).Collect()
-		if err != nil {
-			if reconnectErr := reconnectIfNeeded(&sourceClient, acc.SourceHost, acc.SourceUser, acc.SourcePass, err); reconnectErr == nil {
-				sourceData, err = sourceClient.Select(folderName, nil).Wait()
-				if err != nil {
-					log.Printf("[%s] ERRO: não foi possível reselecionar pasta após reconexão: %v", acc.SourceEmail, err)
-					continue
-				}
-				messages, err = sourceClient.Fetch(uidSet, fetchOptions).Collect()
-				if err != nil {
-					log.Printf("[%s] ERRO: falha ao obter mensagens após reconexão: %v", acc.SourceEmail, err)
-					continue
-				}
-			} else {
-				log.Printf("[%s] ERRO: falha ao obter mensagens: %v", acc.SourceEmail, err)
-				continue
-			}
-		}
-
-		log.Printf("[%s] Pasta '%s' tem %d mensagens para processar.", acc.SourceEmail, folderName, len(messages))
-
-		// Selecionar pasta de destino
+		// Selecionar pasta de destino ANTES de iterar nos lotes
 		if !config.DryRun {
 			_, err = destClient.Select(destFolderName, nil).Wait()
 			if err != nil {
@@ -353,106 +321,163 @@ func migrateAccount(acc MigrationAccount, config MigrationConfig) error {
 			}
 		}
 
+		fetchOptions := &imap.FetchOptions{
+			BodySection: []*imap.FetchItemBodySection{{}},
+			Flags:       true,
+			Envelope:    true,
+		}
+
+		// Tamanho do lote ajustável para evitar timeout e liberar memória
+		batchSize := imap.UID(config.FetchBatchSize)
 		copiedCount := 0
-		for i, msg := range messages {
-			// Verificar corpo da mensagem
-			if len(msg.BodySection) == 0 {
-				log.Printf("[%s] AVISO: mensagem %d/%d da pasta '%s' tem corpo vazio, pulando.", acc.SourceEmail, i+1, len(messages), folderName)
-				folderStats.SkippedMessages++
-				continue
-			}
-			bodyBytes := msg.BodySection[0].Bytes
+		processedCount := 0
+		totalExpected := sourceData.NumMessages
 
-			// Filtro de tamanho
-			if shouldInclude, reason := config.ShouldIncludeMessage(msg.Envelope.Date, len(bodyBytes)); !shouldInclude {
-				log.Printf("[%s] Mensagem %d/%d pulada: %s", acc.SourceEmail, i+1, len(messages), reason)
-				folderStats.SkippedMessages++
-				continue
+		log.Printf("[%s] Iniciando fetch e cópia em lotes (tamanho %d) da pasta '%s'...", acc.SourceEmail, batchSize, folderName)
+
+		for start := imap.UID(1); start < sourceData.UIDNext; start += batchSize {
+			end := start + batchSize - 1
+			if end >= sourceData.UIDNext {
+				end = sourceData.UIDNext - 1
 			}
 
-			// Verificar duplicados
-			if config.SkipDuplicates {
-				messageID := msg.Envelope.MessageID
-				if messageID == "" {
-					messageID = GenerateMessageHash(msg.Envelope, len(bodyBytes))
+			uidSet := imap.UIDSet{}
+			uidSet.AddRange(start, end)
+
+			log.Printf("[%s] Fazendo fetch de lote (UIDs %d a %d) da pasta '%s'...", acc.SourceEmail, start, end, folderName)
+
+			messages, err := sourceClient.Fetch(uidSet, fetchOptions).Collect()
+			if err != nil {
+				if reconnectErr := reconnectIfNeeded(&sourceClient, acc.SourceHost, acc.SourceUser, acc.SourcePass, err); reconnectErr == nil {
+					sourceData, err = sourceClient.Select(folderName, nil).Wait()
+					if err != nil {
+						log.Printf("[%s] ERRO: não foi possível reselecionar pasta após reconexão: %v", acc.SourceEmail, err)
+						break
+					}
+					messages, err = sourceClient.Fetch(uidSet, fetchOptions).Collect()
+					if err != nil {
+						log.Printf("[%s] ERRO: falha ao obter mensagens após reconexão no lote: %v", acc.SourceEmail, err)
+						break
+					}
+				} else {
+					log.Printf("[%s] ERRO: falha ao obter mensagens do lote: %v", acc.SourceEmail, err)
+					break
 				}
-				if dupTracker.IsDuplicate(messageID) {
-					log.Printf("[%s] Mensagem %d/%d pulada: duplicada (Message-ID: %s)", acc.SourceEmail, i+1, len(messages), messageID)
+			}
+
+			if len(messages) == 0 {
+				continue
+			}
+
+			// Iterar sobre as mensagens do lote atual
+			for _, msg := range messages {
+				processedCount++
+
+				// Verificar corpo da mensagem
+				if len(msg.BodySection) == 0 {
+					log.Printf("[%s] AVISO: mensagem %d/%d da pasta '%s' tem corpo vazio, pulando.", acc.SourceEmail, processedCount, totalExpected, folderName)
 					folderStats.SkippedMessages++
 					continue
 				}
-				dupTracker.MarkAsCopied(messageID)
-			}
+				bodyBytes := msg.BodySection[0].Bytes
 
-			validFlags := filterValidFlags(msg.Flags)
+				// Filtro de tamanho
+				if shouldInclude, reason := config.ShouldIncludeMessage(msg.Envelope.Date, len(bodyBytes)); !shouldInclude {
+					log.Printf("[%s] Mensagem %d/%d pulada: %s", acc.SourceEmail, processedCount, totalExpected, reason)
+					folderStats.SkippedMessages++
+					continue
+				}
 
-			log.Printf("[%s] Copiando mensagem %d/%d da pasta '%s' (tamanho: %d bytes)...", acc.SourceEmail, i+1, len(messages), folderName, len(bodyBytes))
+				// Verificar duplicados
+				if config.SkipDuplicates {
+					messageID := msg.Envelope.MessageID
+					if messageID == "" {
+						messageID = GenerateMessageHash(msg.Envelope, len(bodyBytes))
+					}
+					if dupTracker.IsDuplicate(messageID) {
+						log.Printf("[%s] Mensagem %d/%d pulada: duplicada (Message-ID: %s)", acc.SourceEmail, processedCount, totalExpected, messageID)
+						folderStats.SkippedMessages++
+						continue
+					}
+					dupTracker.MarkAsCopied(messageID)
+				}
 
-			if config.DryRun {
-				log.Printf("[%s] [DRY-RUN] Mensagem %d/%d seria copiada", acc.SourceEmail, i+1, len(messages))
-				folderStats.CopiedMessages++
+				validFlags := filterValidFlags(msg.Flags)
+
+				log.Printf("[%s] Copiando mensagem %d/%d da pasta '%s' (tamanho: %d bytes)...", acc.SourceEmail, processedCount, totalExpected, folderName, len(bodyBytes))
+
+				if config.DryRun {
+					log.Printf("[%s] [DRY-RUN] Mensagem %d/%d seria copiada", acc.SourceEmail, processedCount, totalExpected)
+					folderStats.CopiedMessages++
+					copiedCount++
+					continue
+				}
+
+				// Tentar copiar com retry
+				var copyErr error
+				for attempt := 0; attempt <= config.MaxRetries; attempt++ {
+					if attempt > 0 {
+						log.Printf("[%s] Tentativa %d/%d para a mensagem %d/%d", acc.SourceEmail, attempt, config.MaxRetries, processedCount, totalExpected)
+
+						// Se houve erro na tentativa anterior indicando conexão fechada, reconectar
+						if copyErr != nil && isConnectionClosed(copyErr) {
+							log.Printf("[%s] Conexão com destino parece fechada na cópia. Reconectando...", acc.DestinationEmail)
+							reconnectIfNeeded(&destClient, acc.DestinationHost, acc.DestinationUser, acc.DestinationPass, copyErr)
+						}
+					}
+
+					appendCmd := destClient.Append(destFolderName, int64(len(bodyBytes)), &imap.AppendOptions{
+						Flags: validFlags,
+						Time:  msg.Envelope.Date,
+					})
+
+					var writeErr error
+					_, writeErr = io.Copy(appendCmd, bytes.NewReader(bodyBytes))
+
+					closeErr := appendCmd.Close()
+
+					if writeErr != nil {
+						if strings.Contains(writeErr.Error(), "OVERQUOTA") || strings.Contains(writeErr.Error(), "Quota exceeded") {
+							errMsg := fmt.Sprintf("Quota excedida no destino ao copiar mensagem %d/%d da pasta '%s'", processedCount, totalExpected, folderName)
+							report.Errors = append(report.Errors, errMsg)
+							log.Printf("[%s] ERRO CRÍTICO: Quota excedida no destino!", acc.DestinationEmail)
+							return fmt.Errorf("quota excedida no destino: %w", writeErr)
+						}
+						copyErr = writeErr
+						continue
+					}
+
+					if closeErr != nil {
+						if strings.Contains(closeErr.Error(), "OVERQUOTA") || strings.Contains(closeErr.Error(), "Quota exceeded") {
+							errMsg := fmt.Sprintf("Quota excedida no destino ao finalizar mensagem %d/%d da pasta '%s'", processedCount, totalExpected, folderName)
+							report.Errors = append(report.Errors, errMsg)
+							log.Printf("[%s] ERRO CRÍTICO: Quota excedida no destino!", acc.DestinationEmail)
+							return fmt.Errorf("quota excedida no destino: %w", closeErr)
+						}
+						copyErr = closeErr
+						continue
+					}
+
+					// Sucesso
+					copyErr = nil
+					break
+				}
+
+				if copyErr != nil {
+					errMsg := fmt.Sprintf("Falha ao copiar mensagem %d/%d da pasta '%s' após %d tentativas: %v", processedCount, totalExpected, folderName, config.MaxRetries+1, copyErr)
+					report.Errors = append(report.Errors, errMsg)
+					folderStats.FailedMessages++
+					log.Printf("[%s] ERRO: %s", acc.SourceEmail, errMsg)
+					continue
+				}
+
 				copiedCount++
-				continue
+				folderStats.CopiedMessages++
+				log.Printf("[%s] Mensagem %d/%d copiada com sucesso para '%s'", acc.SourceEmail, processedCount, totalExpected, destFolderName)
 			}
-
-			// Tentar copiar com retry
-			var copyErr error
-			for attempt := 0; attempt <= config.MaxRetries; attempt++ {
-				if attempt > 0 {
-					log.Printf("[%s] Tentativa %d/%d para mensagem %d/%d", acc.SourceEmail, attempt, config.MaxRetries, i+1, len(messages))
-				}
-
-				appendCmd := destClient.Append(destFolderName, int64(len(bodyBytes)), &imap.AppendOptions{
-					Flags: validFlags,
-					Time:  msg.Envelope.Date,
-				})
-
-				var writeErr error
-				_, writeErr = io.Copy(appendCmd, bytes.NewReader(bodyBytes))
-
-				closeErr := appendCmd.Close()
-
-				if writeErr != nil {
-					if strings.Contains(writeErr.Error(), "OVERQUOTA") || strings.Contains(writeErr.Error(), "Quota exceeded") {
-						errMsg := fmt.Sprintf("Quota excedida no destino ao copiar mensagem %d/%d da pasta '%s'", i+1, len(messages), folderName)
-						report.Errors = append(report.Errors, errMsg)
-						log.Printf("[%s] ERRO CRÍTICO: Quota excedida no destino!", acc.DestinationEmail)
-						return fmt.Errorf("quota excedida no destino: %w", writeErr)
-					}
-					copyErr = writeErr
-					continue
-				}
-
-				if closeErr != nil {
-					if strings.Contains(closeErr.Error(), "OVERQUOTA") || strings.Contains(closeErr.Error(), "Quota exceeded") {
-						errMsg := fmt.Sprintf("Quota excedida no destino ao finalizar mensagem %d/%d da pasta '%s'", i+1, len(messages), folderName)
-						report.Errors = append(report.Errors, errMsg)
-						log.Printf("[%s] ERRO CRÍTICO: Quota excedida no destino!", acc.DestinationEmail)
-						return fmt.Errorf("quota excedida no destino: %w", closeErr)
-					}
-					copyErr = closeErr
-					continue
-				}
-
-				// Sucesso
-				copyErr = nil
-				break
-			}
-
-			if copyErr != nil {
-				errMsg := fmt.Sprintf("Falha ao copiar mensagem %d/%d da pasta '%s' após %d tentativas: %v", i+1, len(messages), folderName, config.MaxRetries+1, copyErr)
-				report.Errors = append(report.Errors, errMsg)
-				folderStats.FailedMessages++
-				log.Printf("[%s] ERRO: %s", acc.SourceEmail, errMsg)
-				continue
-			}
-
-			copiedCount++
-			folderStats.CopiedMessages++
-			log.Printf("[%s] Mensagem %d/%d copiada com sucesso para '%s'", acc.SourceEmail, i+1, len(messages), destFolderName)
 		}
 
-		log.Printf("[%s] Pasta '%s': %d/%d mensagens copiadas com sucesso.", acc.SourceEmail, folderName, copiedCount, len(messages))
+		log.Printf("[%s] Pasta '%s': %d mensagens copiadas com sucesso.", acc.SourceEmail, folderName, copiedCount)
 
 		report.Folders = append(report.Folders, folderStats)
 	}

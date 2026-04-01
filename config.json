@@ -6,6 +6,7 @@
   "max_retries": 3,
   "max_message_size_mb": 0,
   "flatten_folders": false,
+  "fetch_batch_size": 1000,
   
   "exclude_folders": [
     "INBOX.Drafts",
